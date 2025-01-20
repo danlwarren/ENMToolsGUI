@@ -1,0 +1,173 @@
+#' Make and save ENMTools.species objects
+#' Built with the help of Shiny Assistant, https://gallery.shinyapps.io/assistant/
+#' 
+#' @return An enmtools.species object
+
+library(shiny)
+library(bslib)
+library(leaflet)
+library(terra)
+library(dplyr)
+library(sf)
+
+ui <- page_sidebar(
+  title = "ENMTools Species Creator",
+  sidebar = sidebar(
+    # Input controls
+    textInput("species_name", "Species Name"),
+    
+    fileInput("presence_file", "Upload Presence Points (CSV)",
+              accept = c("text/csv", "text/comma-separated-values,text/plain", ".csv")),
+    
+    fileInput("background_file", "Upload Background Points (CSV)",
+              accept = c("text/csv", "text/comma-separated-values,text/plain", ".csv")),
+    
+    fileInput("range_file", "Upload Range Raster",
+              accept = c(".tif", ".asc", ".grd")),
+    
+    actionButton("create_species", "Create Species Object", class = "btn-primary")
+  ),
+  
+  # Main panel with map and results
+  layout_columns(
+    card(
+      card_header("Interactive Map"),
+      leafletOutput("map", height = "600px")
+    ),
+    card(
+      card_header("Species Object Summary"),
+      verbatimTextOutput("species_summary")
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  
+  # Reactive values to store data
+  rv <- reactiveValues(
+    presence_points = NULL,
+    background_points = NULL,
+    range_raster = NULL,
+    species_obj = NULL
+  )
+  
+  # Process presence points
+  observeEvent(input$presence_file, {
+    req(input$presence_file)
+    
+    df <- read.csv(input$presence_file$datapath)
+    # Convert to SpatVector
+    if(all(c("longitude", "latitude") %in% colnames(df))) {
+      coords <- df[, c("longitude", "latitude")]
+      rv$presence_points <- vect(as.matrix(coords), crs="epsg:4326")
+    } else if(all(c("lon", "lat") %in% colnames(df))) {
+      coords <- df[, c("lon", "lat")]
+      rv$presence_points <- vect(as.matrix(coords), crs="epsg:4326")
+    } else {
+      showNotification("CSV must have columns: longitude,latitude or lon,lat", 
+                       type = "error")
+    }
+  })
+  
+  # Process background points
+  observeEvent(input$background_file, {
+    req(input$background_file)
+    
+    df <- read.csv(input$background_file$datapath)
+    # Convert to SpatVector
+    if(all(c("longitude", "latitude") %in% colnames(df))) {
+      coords <- df[, c("longitude", "latitude")]
+      rv$background_points <- vect(as.matrix(coords), crs="epsg:4326")
+    } else if(all(c("lon", "lat") %in% colnames(df))) {
+      coords <- df[, c("lon", "lat")]
+      rv$background_points <- vect(as.matrix(coords), crs="epsg:4326")
+    } else {
+      showNotification("CSV must have columns: longitude,latitude or lon,lat", 
+                       type = "error")
+    }
+  })
+  
+  # Process range raster
+  observeEvent(input$range_file, {
+    req(input$range_file)
+    rv$range_raster <- rast(input$range_file$datapath)
+  })
+  
+  # Create species object
+  observeEvent(input$create_species, {
+    rv$species_obj <- enmtools.species(
+      range = if(!is.null(rv$range_raster)) rv$range_raster else NA,
+      presence.points = if(!is.null(rv$presence_points)) rv$presence_points else NA,
+      background.points = if(!is.null(rv$background_points)) rv$background_points else NA,
+      species.name = if(input$species_name != "") input$species_name else NA,
+      models = NA
+    )
+  })
+  
+  # Render map
+  output$map <- renderLeaflet({
+    leaflet() %>%
+      addTiles() %>%
+      setView(lng = 0, lat = 0, zoom = 2)
+  })
+  
+  # Update map as data is loaded
+  observe({
+    leafletProxy("map") %>%
+      clearMarkers() %>%
+      clearShapes()
+    
+    # Add presence points
+    if (!is.null(rv$presence_points)) {
+      coords <- crds(rv$presence_points)
+      leafletProxy("map") %>%
+        addCircleMarkers(
+          lng = coords[,1], 
+          lat = coords[,2],
+          color = "black",
+          radius = 5,
+          group = "Presence Points"
+        )
+    }
+    
+    # Add background points
+    if (!is.null(rv$background_points)) {
+      coords <- crds(rv$background_points)
+      leafletProxy("map") %>%
+        addCircleMarkers(
+          lng = coords[,1], 
+          lat = coords[,2],
+          color = "red",
+          radius = 3,
+          group = "Background Points"
+        )
+    }
+    
+    # Add range raster if available
+    if (!is.null(rv$range_raster)) {
+      # Convert raster to spatial polygons
+      tryCatch({
+        raster_sf <- st_as_sf(as.polygons(rv$range_raster))
+        leafletProxy("map") %>%
+          addPolygons(
+            data = raster_sf,
+            fillColor = "orange",
+            fillOpacity = 0.3,
+            weight = 1,
+            color = "orange",
+            group = "Range"
+          )
+      }, error = function(e) {
+        showNotification("Error displaying raster on map", type = "warning")
+      })
+    }
+  })
+  
+  # Display species object summary
+  output$species_summary <- renderPrint({
+    req(rv$species_obj)
+    summary(rv$species_obj)
+  })
+}
+
+shinyApp(ui, server)
